@@ -1,0 +1,662 @@
+---
+title: "Financial Health of Eye Care Practices Source Code"
+subtitle: "CSC424 Final Project"
+---
+
+```{r setup, message=F, warning=F}
+setwd("C:\\Repos\\Depaul\\CSC424\\Project\\")
+library(gplots)
+library(ca)
+library(vcd)
+library(FactoMineR)
+library(factoextra)
+library(corrplot)
+library(yacca)
+library(cluster)
+library(GGally)
+library(scales)
+library(car)
+library(QuantPsyc)
+library(leaps)
+library(psych)
+```
+
+# Data Cleaning
+
+data prep has been consolidated into a single function so that it can be repeated throughout our analysis.
+
+```{r dataPrep}
+data_prep <- function() {
+  ActualData <<- read.csv("practice_performance.csv", header=TRUE)
+  RawPerformance <<- read.csv("practice_performance.csv", header=TRUE)
+  
+  count_pre_cleaning <- nrow(RawPerformance)
+
+  # Requiring sales and receipts to be greater than zero
+  RawPerformance <<- subset(RawPerformance, salesbyproviderall > 0)
+  RawPerformance <<- subset(RawPerformance, salesbyproviderinsurance > 0)
+  RawPerformance <<- subset(RawPerformance, salesbyproviderpatient > 0)
+  RawPerformance <<- subset(RawPerformance, receiptsbyproviderall > 0)
+  RawPerformance <<- subset(RawPerformance, receiptsbyproviderinsurance > 0)
+  RawPerformance <<- subset(RawPerformance, receiptsbyproviderpatient > 0)
+  count_after_cleaning_sales <- nrow(RawPerformance)
+  
+  # Requiring clinical events to be greater than zero.
+  RawPerformance <<- subset(RawPerformance, eyeglasscaptureratebyorder > 0)
+  RawPerformance <<- subset(RawPerformance, arcaptureratebyorder > 0)
+  RawPerformance <<- subset(RawPerformance, contactlenscapturerate > 0)
+  RawPerformance <<- subset(RawPerformance, medicalmanagementratio > 0)
+  RawPerformance <<- subset(RawPerformance, ratio9921x > 0)
+  RawPerformance <<- subset(RawPerformance, newpatientpercentage > 0)
+  RawPerformance <<- subset(RawPerformance, productionbooked > 0)
+  RawPerformance <<- subset(RawPerformance, productioncompleted > 0)
+  count_after_cleaning_rates <- nrow(RawPerformance)
+
+  # Require annual sales between 500k and 6000k
+  RawPerformance <<- subset(RawPerformance, salesbyproviderall <= 1500000)
+  RawPerformance <<- subset(RawPerformance, salesbyproviderall >= 125000)
+  count_after_cleaning_annual <- nrow(RawPerformance)
+
+  # Remove extreme receipts to sales ratios and very large accounts receivable
+  RawPerformance <<- subset(RawPerformance, salesbyproviderinsurance/(receiptsbyproviderinsurance + 0.0001) < 5)
+  RawPerformance <<- subset(RawPerformance, salesbyproviderinsurance/(receiptsbyproviderinsurance + 0.0001) > 0.2)
+  RawPerformance <<- subset(RawPerformance, accountsreceivableall < salesbyproviderall * 1.5)
+  count_after_cleaning_ledgers <- nrow(RawPerformance)
+
+  # Building a summary of the rows removed so that we know the impact.
+  DataRemoved <<- data.frame(step = "Remove Negative Dollar Rows", records = (count_pre_cleaning - count_after_cleaning_sales))
+  DataRemoved <<- rbind(DataRemoved, data.frame(step = "Remove Zero-Value Rates", records = (count_after_cleaning_sales - count_after_cleaning_rates)))
+  DataRemoved <<- rbind(DataRemoved, data.frame(step = "Remove Outlying Annual Revenue", records = (count_after_cleaning_rates - count_after_cleaning_annual)))
+  DataRemoved <<- rbind(DataRemoved, data.frame(step = "Remove Outlying AR", records = (count_after_cleaning_annual - count_after_cleaning_ledgers)))
+  DataRemoved <<- rbind(DataRemoved, data.frame(step = "Total Removed", records = (count_pre_cleaning - count_after_cleaning_ledgers)))
+
+  # Fixing the ratio9921x so that it makes sense as a rate.
+  ratio9921xdenominator <- RawPerformance$ratio9921xdenominator + RawPerformance$ratio9921xnumerator
+  ratio9921x <- RawPerformance$ratio9921xnumerator / (ratio9921xdenominator + 0.0001)
+  RawPerformance <<- subset(RawPerformance, select=-c(ratio9921x, ratio9921xdenominator))
+  RawPerformance <<- cbind(RawPerformance, ratio9921x, ratio9921xdenominator)
+  rm(ratio9921x, ratio9921xdenominator)
+  
+  # Count-based performance data
+  CountPerformance <<- subset(RawPerformance, select=c(
+    arcaptureratebyordernumerator,
+    contactlenscaptureratenumerator,
+    eyeglasscaptureratebyordernumerator,
+    medicalmanagementrationumerator,
+    newpatientpercentagenumerator,
+    productionbookednumerator,
+    patientage0to9,
+    patientage10to19,
+    patientage20to29,
+    patientage30to39,
+    patientage40to49,
+    patientage50to59,
+    patientage60to69,
+    patientage70to79,
+    patientage80to89,
+    patientage90to99,
+    patientgenderfemale,
+    ratio9921xdenominator,
+    ratio9921xnumerator,
+    salesbyproviderinsurance,
+    salesbyproviderpatient,
+    receiptsbyproviderinsurance,
+    receiptsbyproviderpatient,
+    accountsreceivablecollections,
+    accountsreceivableinsurance,
+    accountsreceivablepatient
+  ))
+  
+  # Rate-based performance data
+  RatePerformance <<- subset(RawPerformance, select=c(
+    arcaptureratebyorder,
+    contactlenscapturerate,
+    eyeglasscaptureratebyorder,
+    medicalmanagementratio,
+    newpatientpercentage,
+    ratio9921x,
+    salesbyproviderinsurance,
+    salesbyproviderpatient,
+    receiptsbyproviderinsurance,
+    receiptsbyproviderpatient,
+    accountsreceivablecollections,
+    accountsreceivableinsurance,
+    accountsreceivablepatient
+  ))
+  
+  # Create demographic rates and add them to the data
+  totalpatients <- RawPerformance$patientgenderfemale + RawPerformance$patientgendermale
+  patientage0to9 <- RawPerformance$patientage0to9 / totalpatients
+  patientage10to19 <- RawPerformance$patientage10to19 / totalpatients
+  patientage20to29 <- RawPerformance$patientage20to29 / totalpatients
+  patientage30to39 <- RawPerformance$patientage30to39 / totalpatients
+  patientage40to49 <- RawPerformance$patientage40to49 / totalpatients
+  patientage50to59 <- RawPerformance$patientage50to59 / totalpatients
+  patientage60to69 <- RawPerformance$patientage60to69 / totalpatients
+  patientage70to79 <- RawPerformance$patientage70to79 / totalpatients
+  patientage80to89 <- RawPerformance$patientage80to89 / totalpatients
+  patientage90to99 <- RawPerformance$patientage90to99 / totalpatients
+  patientgenderfemale <- RawPerformance$patientgenderfemale / totalpatients
+  patientgendermale <- RawPerformance$patientgendermale / totalpatients
+  
+  RatePerformance <<- cbind(RatePerformance,
+                          patientage0to9,
+                          patientage10to19,
+                          patientage20to29,
+                          patientage30to39,
+                          patientage40to49,
+                          patientage50to59,
+                          patientage60to69,
+                          patientage70to79,
+                          patientage80to89,
+                          patientage90to99,
+                          patientgenderfemale,
+                          totalpatients
+  )
+}
+data_prep()
+```
+
+The following table shows the summary of the data being removed by the cleaning.
+
+```{r dataPrepSummary}
+DataRemoved
+```
+
+# Correspondence Analysis
+
+```{r correspondence}
+data_prep()
+## Creating categorical variables from Patientage variables 
+#First, combine patientage variables to create wider age groups
+RawPerformance$patientage0to29 = RawPerformance$patientage0to9 + RawPerformance$patientage10to19 + RawPerformance$patientage20to29
+RawPerformance$patientage30to59 = RawPerformance$patientage30to39 + RawPerformance$patientage40to49 + RawPerformance$patientage50to59
+RawPerformance$patientage60to89 = RawPerformance$patientage60to69 + RawPerformance$patientage70to79 + RawPerformance$patientage80to89
+RawPerformance$patientage90to119 = RawPerformance$patientage90to99 + RawPerformance$patientage100to109 + RawPerformance$patientage110to119
+
+#Remove the original patientage variables (THIS IS OPTIONAL)
+RawPerformance$patientage0to9 = NULL
+RawPerformance$patientage10to19 = NULL
+RawPerformance$patientage20to29 = NULL
+RawPerformance$patientage30to39 = NULL
+RawPerformance$patientage40to49 = NULL
+RawPerformance$patientage50to59 = NULL
+RawPerformance$patientage60to69 = NULL
+RawPerformance$patientage70to79 = NULL
+RawPerformance$patientage80to89 = NULL
+RawPerformance$patientage90to99 = NULL
+RawPerformance$patientage100to109 = NULL
+RawPerformance$patientage110to119 = NULL
+
+dim(RawPerformance)
+
+# Let's check the mean counts of each patientage variable
+summary(RawPerformance$patientage0to29)
+summary(RawPerformance$patientage30to59)
+summary(RawPerformance$patientage60to89)
+summary(RawPerformance$patientage90to119)
+
+# For each of the new patientage variables, if the number of patients (value in each cell) 
+# is smaller than a certain value, replace it with a category
+attach(RawPerformance)
+
+RawPerformance$patientage0to29[patientage0to29 <= 500] = "Low" 
+RawPerformance$patientage0to29[patientage0to29 > 500 & patientage0to29 <= 1000] = "Medium" 
+RawPerformance$patientage0to29[patientage0to29 > 1000] = "High"
+
+RawPerformance$patientage30to59[patientage30to59 <= 500] = "Low" 
+RawPerformance$patientage30to59[patientage30to59 > 500 & patientage30to59 <= 1000] = "Medium" 
+RawPerformance$patientage30to59[patientage30to59 > 1000] = "High"
+
+RawPerformance$patientage60to89[patientage60to89 <= 500] = "Low" 
+RawPerformance$patientage60to89[patientage60to89 > 500 & patientage60to89 <= 1000] = "Medium" 
+RawPerformance$patientage60to89[patientage60to89 > 1000] = "High"
+
+RawPerformance$patientage90to119[patientage90to119 <= 500] = "Low" 
+RawPerformance$patientage90to119[patientage90to119 > 500 & patientage90to119 <= 1000] = "Medium" 
+RawPerformance$patientage90to119[patientage90to119 > 1000] = "High"
+
+detach(RawPerformance)
+
+#Check frequencies of Low/Medium/High values in age variables
+table(RawPerformance$patientage0to29)
+table(RawPerformance$patientage30to59)
+table(RawPerformance$patientage60to89)
+table(RawPerformance$patientage90to119)
+
+#Converting discrete numerical values (1,2,etc.) to characters
+RawPerformance$patientgendermale = as.character(RawPerformance$patientgendermale)
+RawPerformance$patientgenderfemale = as.character(RawPerformance$patientgenderfemale)
+
+#Grouping the receipt amounts into categories based on the amount of receipt
+attach(RawPerformance)
+RawPerformance$receiptsall[receiptsbyproviderall <= 180000] = "Low" 
+RawPerformance$receiptsall[receiptsbyproviderall > 180000 & receiptsbyproviderall <= 360000] = "Average" 
+RawPerformance$receiptsall[receiptsbyproviderall > 360000 & receiptsbyproviderall <= 900000] = "High"
+RawPerformance$receiptsall[receiptsbyproviderall > 900000 & receiptsbyproviderall] = "Very high"
+detach(RawPerformance)
+
+
+attach(RawPerformance)
+t1 = table(receiptsall, patientage0to29)
+t2 = table(receiptsall, patientage30to59)
+t3 = table(receiptsall, patientage60to89)
+t4 = table(receiptsall, patientage90to119)
+detach(RawPerformance)
+
+#Balloon plots
+balloonplot(t1, main ="0-29 vs. Receipt", label = FALSE, show.margins = FALSE)
+balloonplot(t2, main ="30-59 vs. Receipt", label = FALSE, show.margins = FALSE)
+balloonplot(t3, main ="60-89 vs. Receipt", label = FALSE, show.margins = FALSE)
+balloonplot(t4, main ="90-119 vs. Receipt", label = FALSE, show.margins = FALSE)
+
+
+## Running Correspondence Analysis 
+library(ca)
+
+#CA on t1 
+ca1 = ca(t1)
+mosaic(t1, shade=TRUE, legend=TRUE) 
+
+chisq1 = chisq.test(t1)
+chisq1
+
+#CA on t2
+ca2 = ca(t2)
+mosaic(t2, shade=TRUE, legend=TRUE) 
+
+chisq2 = chisq.test(t2)
+chisq2
+
+#CA on t3 
+ca3 = ca(t3)
+mosaic(t3, shade=TRUE, legend=TRUE) 
+
+chisq3 = chisq.test(t3)
+chisq3
+
+#CA on t4 
+ca4 = ca(t4)
+mosaic(t4, shade=TRUE, legend=TRUE) 
+
+chisq4 = chisq.test(t4)
+chisq4
+```
+
+# Cluster Analysis on Clinical Data
+
+```{r clusterClinicalData}
+data_prep()
+set.seed(1024)
+PairsSample <- sample(nrow(RawPerformance), nrow(RawPerformance)*0.25)
+
+ClinicalData <- subset(RawPerformance, select=c(arcaptureratebyordernumerator, contactlenscaptureratedenominator, contactlenscaptureratenumerator, eyeglasscaptureratebyorderdenominator, eyeglasscaptureratebyordernumerator, medicalmanagementrationumerator, newpatientpercentagenumerator, ratio9921xnumerator, ratio9921xdenominator));
+ClinicalData = log1p(ClinicalData)
+fviz_nbclust(ClinicalData, clara, method="wss", k.max=10, nboot=25) + theme_classic()
+
+set.seed(1024)
+ClinicalDataCluster <- clara(ClinicalData, 5, metric="manhatten", samples=50, pamLike=TRUE)
+fviz_cluster(ClinicalDataCluster, ellipse.type="t", geom="point", pointsize=1, ggtheme = theme_classic())
+
+ClinicalDataVisual <-cbind(ClinicalData, ClinicalDataCluster$clustering)
+colnames(ClinicalDataVisual) <- c('AR Add', 'CL Rx', 'CL Sale', 'EG Rx', 'EG Sale', 'Med', 'New Pat', '99214', '99213', 'Cluster')
+ClinicalDataVisual$Cluster <- as.factor(ClinicalDataVisual$Cluster)
+ggpairs(ClinicalDataVisual[PairsSample,], lower=list(combo=wrap("facethist", binwidth=1), mapping=ggplot2::aes(color=Cluster)))
+
+ClinicalDataMedoids <- cbind(percent(ClinicalDataCluster$clusinfo[,1]/nrow(ClinicalData)), expm1(ClinicalDataCluster$medoids))
+rownames(ClinicalDataMedoids) <- c('(1) High Capture Up-Coding', '(2) Up-Coding', '(3) Low Capture Up-Coding', '(4) Low Capture', '(5) Low Capture Under-Coding')
+colnames(ClinicalDataMedoids) <- c('Cluster Size', 'AR Add', 'CL Rx', 'CL Sale', 'EG Rx', 'EG Sale', 'Med', 'New Pat', '99214', '99213')
+ClinicalDataMedoids
+```
+
+# Cluster Analysis on Patient Demographics
+
+```{r clusterDemographics}
+data_prep()
+set.seed(1024)
+
+#### Use Rate Performance
+patients_rate = subset(RatePerformance, select = c(patientage0to9,
+                                             patientage10to19,
+                                             patientage20to29,
+                                             patientage30to39,
+                                             patientage40to49,
+                                             patientage50to59,
+                                             patientage60to69,
+                                             patientage70to79,
+                                             patientage80to89,
+                                             patientage90to99
+                                             
+))
+
+
+# Find number of K
+fviz_nbclust(patients_rate, clara, method = "wss", k.max = 6, nboot = 25 + theme_classic())
+
+# Kmean Clustering: after several attempts, I find out that k =3 is the best fit amount for clusters.
+
+
+
+#*************************************************
+#Performing CLARA analysis:
+patient_cluster = clara(patients_rate, 3, metric = 'manhattan', samples = 50, pamLike = T)
+patient_cluster
+
+#Visualization for data distribution:
+fviz_cluster(patient_cluster, geom = 'point', ellipse.type = 't',
+             palette = 'jco', ggtheme = theme_classic())
+
+# Correlation Table - GGpairs
+patient_r.Vis = cbind(patients_rate,patient_cluster$clustering)
+colnames(patient_r.Vis) =  c('Patient0-9', 'Patient10-19','Patient20-29','Patient30-39',
+                             'Patient40-49', 'Patient50-59', 'Patient60-69','Patient70-79',
+                             'Patient80-89', 'Patient90-99',"Cluster")
+
+patient_Vis = as.data.frame.matrix(patient_r.Vis)
+
+patient_Vis$Cluster = as.factor(patient_Vis$Cluster)
+
+ggpairs(patient_Vis, lower = list(combo = wrap("facethist", binwidth = 0.1),
+                                    mapping=ggplot2::aes(color=Cluster)))
+
+```
+
+# Hierarchical Clustering on Principal Components
+
+```{r clusterHierarchical}
+#Automate - Tree Build
+HCPC(patients_rate, nb.clust = -1, min = 3, max = NULL, graph = TRUE)
+
+#Continuous Hirachical
+
+#PCA analysis
+patient.pca = PCA(patients_rate, ncp = 4, graph = F)
+fviz_pca_var(patient.pca)
+
+# Apply Clustering
+patient.hc = HCPC(patient.pca, graph = F)
+
+# Map Visualization
+fviz_cluster(patient.hc, main = 'Factor Map')
+```
+
+# Principal Component Analysis and Common Factor Analysis
+
+```{r pca}
+data_prep()
+CountPerformance=log1p(CountPerformance)
+colSums(is.na(CountPerformance))
+
+#Missing values are Replaced With Mean
+
+which(is.na(CountPerformance$accountsreceivablepatient))
+
+CountPerformance$accountsreceivablepatient[which(is.na(CountPerformance$accountsreceivablepatient))]=9.775
+
+dim(CountPerformance)
+dim(RatePerformance)
+
+
+#KMO and Bartlett tets are performed on the Count and rate Performance and it gives good results to continue analysis
+
+bartlett.test(CountPerformance)
+KMO(CountPerformance)
+bartlett.test(RatePerformance)
+KMO(RatePerformance)
+
+
+## Analysis on the CountPerformance
+
+## Checking VIF among the variables and variables with high VIF values will be removed.
+
+predVars_Count <- subset(CountPerformance, select=-c(eyeglasscaptureratebyordernumerator))
+corrplot(cor(predVars_Count), method="number")
+library(mctest)
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+
+##Patient gender female has high VIF and also since it is highly correlated with other variables, we can explain its 
+##variance with the help of other variables even if it is not present. The same Process continues until all the Variables with higher VIF values are taken out. 
+
+predVars_Count$patientgenderfemale=NULL
+
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$receiptsbyproviderpatient=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$patientage60to69=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$patientage40to49=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$patientage70to79=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$patientage30to39=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$patientage50to59=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$patientage80to89=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+predVars_Count$patientage10to19=NULL
+
+imcdiag(predVars_Count, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Count),method="number")
+
+## After all these steps still patientage20to29 and salesbyproviderinsurance variables has VIF just above than 5 and In
+## the correlation matrix these variables are highly correlated with only 4 variables out of 16. So we can keep the variables for analysis.
+
+
+# In this section i checked for the significant correlations(PCA Assumption) in the variables. In CountPerformance every variable has significant correlation
+# with all other variables. Usually if one variables has significant correlations with most of other variables it may result in one component(having one variable variance) so its better to
+## take it out from the analysis. But in this case all variables has significant correlations with other so one component doen't have the variance of one variable.
+
+MCorrTest = corr.test(predVars_Count, adjust="none")
+M = MCorrTest$p
+MTest = ifelse(M < .01, T, F)
+colSums(MTest) - 1
+
+
+#PCA and CFA analysis on CountPerformance
+
+pca_count=prcomp(predVars_Count,scale. = T,center = T)
+plot(pca_count)
+abline(1,0)
+
+summary(pca_count)
+
+# By kaiser and screeplot method we can determine either 2 or 3 components respectively.
+
+#with 2 components
+
+rc_count_2comp=psych::principal(predVars_Count,nfactors = 2,rotate = "varimax")
+print(rc_count_2comp$loadings,cutoff=.4,sort=T)
+
+#CFA with 2 Components on Count Performance
+
+fc_count_2comp=factanal(predVars_Count,2)
+print(fc_count_2comp$loadings,cutoff=.4,sort=T)
+
+# with 3 components
+rc_count_3comp=psych::principal(predVars_Count,nfactors = 3,rotate = "varimax")
+print(rc_count_3comp$loadings,cutoff=.4,sort=T)
+
+fc_count_3comp=factanal(predVars_Count,3)
+print(fc_count_3comp$loadings,cutoff=.4,sort=T)
+
+#Analysis on RatePerformance
+
+## Checking VIF among RatePerformance Variables
+
+predVars_Rate=RatePerformance
+corrplot(cor(predVars_Rate), method="number")
+imcdiag(predVars_Rate, CountPerformance$eyeglasscaptureratebyordernumerator)
+
+predVars_Rate$receiptsbyproviderpatient=NULL
+
+imcdiag(predVars_Rate, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Rate), method="number")
+
+predVars_Rate$totalpatients=NULL
+
+imcdiag(predVars_Rate, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Rate), method="number")
+
+predVars_Rate$patientage60to69=NULL
+
+imcdiag(predVars_Rate, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Rate), method="number")
+
+predVars_Rate$patientage70to79=NULL
+
+imcdiag(predVars_Rate, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Rate), method="number")
+
+predVars_Rate$patientage80to89=NULL
+
+imcdiag(predVars_Rate, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Rate), method="number")
+
+predVars_Rate$receiptsbyproviderinsurance=NULL
+
+imcdiag(predVars_Rate, CountPerformance$eyeglasscaptureratebyordernumerator)
+corrplot(cor(predVars_Rate), method="number")
+
+##Checking for Significant Correlations
+
+MCorrTest = corr.test(predVars_Rate, adjust="none")
+M = MCorrTest$p
+MTest = ifelse(M < .01, T, F)
+colSums(MTest) - 1
+
+##PCA and CFA on RatePerformance
+
+pca_rate=prcomp(predVars_Rate,scale. = T,center = T)
+plot(pca_rate)
+abline(1,0)
+summary(pca_rate)
+
+# By screeplot we can take either 3 or 4 components and by kaiser method 6 components are required. So we check analysis with 3,4,5,6 no.of components
+
+# PCA with 3 components
+
+rc_rate_3comp=psych::principal(predVars_Rate,nfactors = 3,rotate = "varimax")
+print(rc_rate_3comp$loadings,cutoff=.4,sort=T)
+
+## CFA with 3 components
+
+fc_rate_3comp=factanal(predVars_Rate,3)
+print(fc_rate_3comp$loadings,cutoff=.4,sort=T)
+
+
+# PCA with 4 components
+
+rc_rate_4comp=psych::principal(predVars_Rate,nfactors = 4,rotate = "varimax")
+print(rc_rate_4comp$loadings,cutoff=.4,sort=T)
+
+## CFA with 4 components
+
+fc_rate_4comp=factanal(predVars_Rate,4)
+print(fc_rate_4comp$loadings,cutoff=.4,sort=T)
+
+
+# PCA with 5 components
+
+rc_rate_5comp=psych::principal(predVars_Rate,nfactors = 5,rotate = "varimax")
+print(rc_rate_5comp$loadings,cutoff=.4,sort=T)
+
+## CFA with 5 components
+
+fc_rate_5comp=factanal(predVars_Rate,5)
+print(fc_rate_5comp$loadings,cutoff=.4,sort=T)
+
+# PCA with 6 components
+
+rc_rate_6comp=psych::principal(predVars_Rate,nfactors = 6,rotate = "varimax")
+print(rc_rate_6comp$loadings,cutoff=.4,sort=T)
+
+## CFA with 6 components
+
+fc_rate_6comp=factanal(predVars_Rate,6)
+print(fc_rate_6comp$loadings,cutoff=.4,sort=T)
+```
+
+# Canonical Correlation Analysis
+
+```{r cca}
+data_prep()
+
+#Rebuild the PCA data we are pulling the variables from
+PCARates <- subset(RatePerformance, select=c(arcaptureratebyorder, contactlenscapturerate, eyeglasscaptureratebyorder, medicalmanagementratio, newpatientpercentage, ratio9921x, salesbyproviderinsurance, salesbyproviderpatient, accountsreceivablecollections, accountsreceivableinsurance, accountsreceivablepatient, patientage0to9, patientage10to19, patientage20to29, patientage30to39, patientage40to49, patientage90to99))
+PCARates <- log1p(PCARates)
+PCARates$salesbyproviderinsurance <- log1p(PCARates$salesbyproviderinsurance)
+PCARates$salesbyproviderpatient <- log1p(PCARates$salesbyproviderpatient)
+PCARates$accountsreceivablecollections <- log1p(PCARates$accountsreceivablecollections)
+PCARates$accountsreceivableinsurance <- log1p(PCARates$accountsreceivableinsurance)
+PCARates$accountsreceivablepatient <- log1p(PCARates$accountsreceivablepatient)
+PCARates <- na.omit(PCARates)
+
+#Break the data into the x and y variables
+CorePatientData <- subset(PCARates, select=c(medicalmanagementratio, newpatientpercentage, patientage20to29, patientage30to39, patientage40to49, patientage90to99))
+RevenueData <- subset(PCARates, select=c(salesbyproviderinsurance, salesbyproviderpatient, accountsreceivableinsurance, accountsreceivablepatient))
+YoungPatientData <- subset(PCARates, select=c(arcaptureratebyorder, patientage0to9, patientage10to19))
+CaptureData <- subset(PCARates, select=c(contactlenscapturerate, eyeglasscaptureratebyorder))
+
+#Perform the CCA
+CorePatientVSCapture <- cca(CorePatientData, CaptureData)
+
+#Test the CCA Significance
+F.test.cca(CorePatientVSCapture)
+
+#Variates
+CorePatientVSCapture$xcoef[,1:2]
+CorePatientVSCapture$ycoef[,1:2]
+
+#Loadings
+CorePatientVSCapture$xstructcorr[,1:2]
+CorePatientVSCapture$ystructcorr[,1:2]
+
+#Helio plots of the variates
+helio.plot(CorePatientVSCapture, x.name="Core Patient Data", y.name="Capture Rate", xvlab=c('Medical', 'New Patient', 'Age 20-29', 'Age 30-39', 'Age 40-49', 'Age 90-99'), yvlab=c('Contact Lens', 'Eyeglass'))
+helio.plot(CorePatientVSCapture, x.name="Core Patient Data", y.name="Capture Rate", xvlab=c('Medical', 'New Patient', 'Age 20-29', 'Age 30-39', 'Age 40-49', 'Age 90-99'), yvlab=c('Contact Lens', 'Eyeglass'), cv=2)
+```
+
+# R Version and Required Libraries
+
+```{r versionInfo}
+R.version
+packageVersion("gplots")
+packageVersion("ca")
+packageVersion("vcd")
+packageVersion("FactoMineR")
+packageVersion("factoextra")
+packageVersion("corrplot")
+packageVersion("yacca")
+packageVersion("cluster")
+packageVersion("GGally")
+packageVersion("scales")
+packageVersion("car")
+packageVersion("QuantPsyc")
+packageVersion("leaps")
+packageVersion("psych")
+```
